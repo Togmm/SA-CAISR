@@ -1,0 +1,14 @@
+batch_size,256
+dataset,E:\project\Rec\SASRec\SASRec\data\DIGINETICA
+device,cuda
+dropout_rate,0.3
+hidden_units,150
+inference_only,False
+l2_emb,0.0
+lr,0.0005
+maxlen,50
+num_blocks,2
+num_epochs,100
+num_heads,1
+state_dict_path,None
+train_dir,test
