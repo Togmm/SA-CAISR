@@ -4,8 +4,8 @@ import torch
 import argparse
 from typing import Union, Iterable, Tuple
 from model import SASRec, SASRec_continue_learning
-from utils_0617 import *
 # from utils import *
+from utils_0617 import *
 import torch.nn.functional as F
 
 def str2bool(s):
@@ -55,22 +55,115 @@ def evaluate_result(num_tmp_batch, tmp_sampler, model):
             seq, pos = np.array(seq), np.array(pos)
             result_logits = -model.predict(seq, max_item)
             result = evaluate_continue_learning(seq, result_logits, max_item, pos)
-            MRR_10 += result[0]; RECALL_10 += result[1]; MRR_20 += result[3]; RECALL_20 += result[4]; tol_num += result[6]
             # MRR_10 += result[0]; RECALL_10 += result[1]; MRR_20 += result[2]; RECALL_20 += result[3]; tol_num += result[4]
+            MRR_10 += result[0]; RECALL_10 += result[1]; MRR_20 += result[3]; RECALL_20 += result[4]; tol_num += result[6]
         print(f'Num of Test/Valid: {tol_num}')
     model.eval()
     return MRR_10 / tol_num, RECALL_10 / tol_num, MRR_20 / tol_num, RECALL_20 / tol_num
 
-def dpo_loss(beta, pos_logits, neg_logits, pos_logits_ref, neg_logits_ref):
-    win_logits = torch.log(torch.sigmoid(pos_logits))
-    lose_logits = torch.log(torch.sigmoid(neg_logits))
-    win_logits_ref = torch.log(torch.sigmoid(pos_logits_ref))
-    lose_logits_ref = torch.log(torch.sigmoid(neg_logits_ref))
-    labels = (pos_logits != 0).float()
-    diff = (labels * (win_logits - lose_logits)).sum(axis=-1)
-    diff_ref = (labels * (win_logits_ref - lose_logits_ref)).sum(axis=-1)
+def dpo_loss(beta, win_logits, lose_logits, win_logits_ref, lose_logits_ref):
+    diff = win_logits - lose_logits
+    diff_ref = win_logits_ref - lose_logits_ref
+    # diff = win_logits - win_logits_ref
     dpo_loss = - F.logsigmoid(beta * (diff - diff_ref))
     return dpo_loss.mean()
+
+
+def InFoNCE(logits_a, logits_b, temperature=0.07):
+    """
+    logits_a: [B, item_num], 目标模型的预测分数（未 softmax）
+    logits_b: [B, item_num], 参考模型的预测分数（未 softmax）
+    """
+    # 归一化预测分数（可选，如果 logits 本身不归一化，这很重要）
+    z_a = F.normalize(logits_a, dim=1)
+    z_b = F.normalize(logits_b, dim=1)
+
+    # 相似度矩阵（dot-product similarity）
+    sim_matrix = torch.matmul(z_a, z_b.T)  # [B, B]
+    sim_matrix /= temperature
+
+    # 构建标签（正样本是对角线）
+    batch_size = logits_a.size(0)
+    labels = torch.arange(batch_size).to(logits_a.device)
+
+    # 对比损失（InfoNCE）
+    loss = F.cross_entropy(sim_matrix, labels)
+    return loss
+
+def contrastive_loss(logits, logits_dp, labels, margin=0.5):
+    """
+    logits, logits_dp: (batch_size, num_classes)
+    labels: (batch_size,) LongTensor
+    margin: 最小距离的边界（远离时）
+    """
+    logits = F.normalize(logits, dim=1)
+    logits_dp = F.normalize(logits_dp, dim=1)
+
+    # 计算 logits_dp 的前 20 个最大值的索引（即 top-20 预测）
+    topk = 20
+    topk_preds = logits_dp.topk(topk, dim=1).indices  # (batch_size, 20)
+
+    # 判断每个样本的真实标签是否出现在对应的 top-20 中
+    # labels: (batch_size,) -> (batch_size, 1) 以便广播比较
+    labels_expanded = labels.unsqueeze(1)  # (batch_size, 1)
+
+    # mask 表示是否在 top-20 内，即预测正确（在宽限范围内）
+    mask = (topk_preds == labels_expanded).any(dim=1)  # (batch_size,)
+
+    # 计算余弦相似度（也可以换成 L2）
+    sim = F.cosine_similarity(logits, logits_dp, dim=1)  # (batch_size,)
+
+    # 对于正确的样本，希望两者靠近 => 相似度高 => loss = 1 - sim
+    positive_loss = (1 - sim)[mask].mean() if mask.any() else 0.0
+
+    # 对于错误的样本，希望两者远离 => 相似度低 => loss = max(0, sim - margin)
+    negative_loss = F.relu(sim[~mask] - margin).mean() if (~mask).any() else 0.0
+
+    return positive_loss + negative_loss
+
+def contrastive_loss_fe(logits, logits_dp, feature, feature_dp, labels, margin=0.5):
+    """
+    logits, logits_dp: (batch_size, num_classes)
+    labels: (batch_size,) LongTensor
+    margin: 最小距离的边界（远离时）
+    """
+    logits = F.normalize(logits, dim=1)
+    logits_dp = F.normalize(logits_dp, dim=1)
+    # 计算 logits_dp 的前 20 个最大值的索引（即 top-20 预测）
+    topk = 20
+    topk_preds = logits_dp.topk(topk, dim=1).indices  # (batch_size, 20)
+
+    # 判断每个样本的真实标签是否出现在对应的 top-20 中
+    # labels: (batch_size,) -> (batch_size, 1) 以便广播比较
+    labels_expanded = labels.unsqueeze(1)  # (batch_size, 1)
+
+    # mask 表示是否在 top-20 内，即预测正确（在宽限范围内）
+    mask = (topk_preds == labels_expanded).any(dim=1)  # (batch_size,)
+
+    # 计算余弦相似度（也可以换成 L2）
+    sim = F.cosine_similarity(feature, feature_dp, dim=1)  # (batch_size,)
+
+    # 对于正确的样本，希望两者靠近 => 相似度高 => loss = 1 - sim
+    positive_loss = (1 - sim)[mask].mean() if mask.any() else 0.0
+
+    # 对于错误的样本，希望两者远离 => 相似度低 => loss = max(0, sim - margin)
+    negative_loss = F.relu(sim[~mask] - margin).mean() if (~mask).any() else 0.0
+
+    return positive_loss + negative_loss
+
+def distillation_loss(logits, logits_dp, temperature=1.0):
+    """
+    logits: 学生模型输出，shape=[B, N]
+    logits_dp: 教师模型输出，shape=[B, N]
+    temperature: 蒸馏温度，一般设为1.0~5.0之间
+    """
+    # 使用temperature softmax得到soft targets
+    soft_target = F.softmax(logits_dp / temperature, dim=1)
+    log_pred = F.log_softmax(logits / temperature, dim=1)
+    
+    # KL散度（student 模仿 teacher）
+    loss_kl = F.kl_div(log_pred, soft_target, reduction='batchmean') * (temperature ** 2)
+    return loss_kl
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='DIGINETICA', type=str)
@@ -94,10 +187,11 @@ parser.add_argument('--joint', default=False, type=bool)  # use joint learning
 parser.add_argument('--valid_portion', default=0.1, type=float)
 parser.add_argument('--stop', default=5, type=int) 
 parser.add_argument('--random_seed', default=0, type=int)
+parser.add_argument('--beta', default=0, type=float)
+parser.add_argument('--alpha', default=4, type=float)
 parser.add_argument('--kneg', default=1, type=int)
 parser.add_argument('--probs_sampling', default=False, type=bool) 
 parser.add_argument('--temperature', default=1.0, type=float)
-parser.add_argument('--beta', default=200.0, type=float)
 
 
 args = parser.parse_args()
@@ -120,15 +214,11 @@ if __name__ == '__main__':
         itemnum = 25958    # number of items in YOOCHOOSE
     elif args.dataset == 'TAOBAO':
         itemnum = 681413
-    elif args.dataset == 'Amazon_cds':
-        itemnum = 16172
-    elif args.dataset == 'Amazon_cds_avg':
-        itemnum = 16172
-    elif args.dataset == 'Amazon_games':
-        itemnum = 14622
     else:
         raise ValueError('Invalid dataset name')
     
+    model_dp = SASRec_continue_learning(itemnum, args).to(args.device)
+    args.dropout_rate = 0.3
     model = SASRec_continue_learning(itemnum, args).to(args.device)
 
     periods = get_periods(args.dataset)
@@ -142,7 +232,7 @@ if __name__ == '__main__':
     MRR_10 = []
     Recall_10 = []
     
-    periods = range(1, 3) # 1 2
+    # periods = range(1, 7) # 1 2
     for period in periods:
         print('Period %d:' % period)
         best_performance, performance = 0, 0
@@ -150,7 +240,7 @@ if __name__ == '__main__':
 
         if args.joint and period > 1:
             for p in range(1, period):
-                pre_train_sess, info = dataloader.train_loader(p-1)
+                pre_train_sess = dataloader.train_loader(p-1)
                 new_data.extend(pre_train_sess)
 
         max_item = dataloader.max_item()
@@ -160,9 +250,10 @@ if __name__ == '__main__':
         num_batch = train_sampler.batch_num()
         # load test data
         user_test, info = dataloader.evaluate_loader(period)
+        print(info)
         test_sampler = Sampler(user_test, args.maxlen, args.test_batch, max_item)
         num_test_batch = test_sampler.batch_num()
-
+        
         cc = 0.0
         for u in range(len(user_train)):
             cc += len(user_train[u])
@@ -184,7 +275,7 @@ if __name__ == '__main__':
             continue
             
         if args.inference_only:
-            args.state_dict_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_infonce_dp_0.3_lr_0.0005_0710/period2/epoch=33.ckpt'
+            args.state_dict_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
             test_result = evaluate_result(num_test_batch, test_sampler, model)
@@ -193,18 +284,26 @@ if __name__ == '__main__':
         
         if period > 2 and not args.joint: 
             args.state_dict_path = os.path.join('./result/' + args.dataset + '_' + args.train_dir, 'period%d/epoch=%d.ckpt' % (period - 1, best_epoch))
-            model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            model_dp.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            # model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
         elif period == 2 and not args.joint:
-            args.state_dict_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
-            model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            args.state_dict_path = f'/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
+            model_dp.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            # model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
         else:
-            init_model(model)
-        
+            init_model(model_dp)
+
+        init_model(model)
+
+        for param in model_dp.parameters():
+            param.requires_grad = False
+
 
         t0 = time.time()
         best_epoch = 1
+        stop_counter = 0
         valid_sampler = Sampler(user_valid, args.maxlen, args.test_batch, max_item, is_subseq=True)
         num_valid_batch = valid_sampler.batch_num()
         valid_result = evaluate_result(num_valid_batch, valid_sampler, model)
@@ -221,38 +320,23 @@ if __name__ == '__main__':
                 # seq, pos, neg = train_sampler.sampler()
                 seq, pos, neg = np.array(seq), np.array(pos), np.array(neg)
                 feature, logits = model(seq, max_item)  # batch x itemnum
+                pos = pos[:, -1]
+                pos = torch.LongTensor(pos).to(args.device)
                 # 构建多分类
-                # pos = torch.LongTensor(pos[:, -1]).to(args.device)
                 # adam_optimizer.zero_grad()
                 # loss = ce_criterion(logits, pos)
                 
-                # 构建正负样本对 bce
-                # batch_indices = torch.arange(logits.size(0), device=logits.device)
-                # pos = pos[:, -1]
-                # neg = neg[:, -1]
-                # pos_logits = logits[batch_indices, pos]
-                # neg_logits = logits[batch_indices, neg]
-                # pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
-                # adam_optimizer.zero_grad()
-                # loss = bce_criterion(pos_logits, pos_labels)
-                # loss += bce_criterion(neg_logits, neg_labels)
-                
                 # ce
-                pos = pos[:, -1]
-                pos = torch.LongTensor(pos).to(args.device)
                 adam_optimizer.zero_grad()
-                loss = ce_criterion(logits, pos)
+                loss_ce = ce_criterion(logits, pos)
 
-                # bpr 
-                # neg = logits.argmax(dim=-1)
+                # bpr
                 # if args.probs_sampling:
                 #     logits_np = logits.detach().cpu().numpy()
                 #     neg = train_sampler.neg_generator_p(session, args.temperature, logits_np)
                 # else:
                 #     neg = neg[:, -1]
                 # neg = torch.LongTensor(neg).to(args.device)
-                # pos = pos[:, -1]
-                # pos = torch.LongTensor(pos).to(args.device)
                 # valid_mask = pos != neg
                 # batch_indices = torch.arange(logits.size(0), device=logits.device)
                 # valid_batch_indices = batch_indices[valid_mask]
@@ -261,11 +345,64 @@ if __name__ == '__main__':
                 # pos_logits = logits[valid_batch_indices, valid_pos]
                 # neg_logits = logits[valid_batch_indices, valid_neg]
                 # adam_optimizer.zero_grad()
-                # loss = -F.logsigmoid(pos_logits - neg_logits).mean()
+                # loss_bpr = -F.logsigmoid(pos_logits - neg_logits).mean()
+                # loss = loss_ce + args.alpha * loss_bpr
+
+                # 构建正负样本对 bce
+                # batch_indices = torch.arange(logits.size(0), device=logits.device)
+                # pos = pos[:, -1]
+                # neg = neg[:, -1]
+                # pos_logits = logits[batch_indices, pos]
+                # neg_logits = logits[batch_indices, neg]
+                # pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
+                # adam_optimizer.zero_grad()
+                # loss_bce = bce_criterion(pos_logits, pos_labels)
+                # loss_bce += bce_criterion(neg_logits, neg_labels)
+                
+                # InFoNCE
+                feature_dp, logits_dp = model_dp(seq, max_item)  # batch x itemnum
+                loss_nce = InFoNCE(logits, logits_dp)
+                # loss = loss_ce + args.alpha * loss_nce + args.beta * loss_bpr
+                loss = loss_ce + args.alpha * loss_nce
+
+                # mse
+                # loss_mse = F.mse_loss(feature, feature_dp)
+                # loss_mse = F.mse_loss(logits, logits_dp)
+                # loss = loss_ce + args.alpha * loss_mse
+                # loss = args.alpha * loss_mse
+
+                # kl
+                # loss_distillation = distillation_loss(logits, logits_dp)
+                # loss = loss_ce + args.alpha * loss_distillation # alpha参与学习
+
+                # contrastive_loss
+                # loss_contrastive = contrastive_loss(logits, logits_dp, pos)
+                # loss_contrastive = contrastive_loss_fe(logits, logits_dp, feature, feature_dp, pos)
+                # loss = loss_ce + args.alpha * loss_contrastive
+
+                # dpo
+                # logits_ref = model_ref(seq, max_item)  # batch x itemnum
+                # logits = F.logsigmoid(logits)
+                # logits_ref = F.logsigmoid(logits_ref)
+                # batch_indices = torch.arange(logits.size(0), device=logits.device)
+                # pos = torch.tensor(pos[:, -1]).to(args.device)
+                # # neg = torch.tensor(neg[:, -1]).to(args.device)
+                # neg = logits_ref.argmax(dim=-1)
+                # valid_mask = pos != neg
+                # valid_batch_indices = batch_indices[valid_mask]
+                # valid_pos = pos[valid_mask]
+                # valid_neg = neg[valid_mask]
+                # pos_logits = logits[valid_batch_indices, valid_pos]
+                # neg_logits = logits[valid_batch_indices, valid_neg]
+                # pos_logits_ref = logits_ref[valid_batch_indices, valid_pos]
+                # neg_logits_ref = logits_ref[valid_batch_indices, valid_neg]
+                # optimizer.zero_grad()
+                # loss = dpo_loss(args.beta, pos_logits, neg_logits, pos_logits_ref, neg_logits_ref)
+
                 for param in model.item_emb.parameters(): loss += args.l2_emb * torch.norm(param)
                 loss.backward()
                 adam_optimizer.step()
-                if step % 10 == 0 or step == num_batch - 1:
+                if step % 50 == 0 or step == num_batch - 1:
                     print("loss in period {} epoch {} iteration {}: {}".format(period, epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
 
             valid_sampler = Sampler(user_valid, args.maxlen, args.test_batch, max_item, is_subseq=True)
@@ -284,8 +421,9 @@ if __name__ == '__main__':
                 best_epoch = epoch
                 best_performance = performance
                 save_model(model, args, period, epoch)
-
-        # ckpt_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_continual_learning_ce/period1/epoch=13.ckpt'
+            # if epoch % 5 == 0:
+            #     save_model(model, args, period, epoch)
+            
         ckpt_path = './result/' + args.dataset + '_' + args.train_dir + f'/period{period}/epoch={best_epoch}.ckpt'
         model.load_state_dict(torch.load(ckpt_path, map_location=torch.device(args.device)))
         test_result = evaluate_result(num_test_batch, test_sampler, model)
