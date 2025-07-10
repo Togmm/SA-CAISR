@@ -507,6 +507,7 @@ class Sampler:
             is_subseq (bool): If True, the given data is sub-sequence. If False, the given data is full
                 original data.
     """
+
     def __init__(self,
                  data: list,
                  maxlen: int,
@@ -515,7 +516,6 @@ class Sampler:
                  is_subseq: bool = False
                  ) -> None:
 
-        self.max_item = max_item
         self.maxlen = maxlen
         self.batch_size = batch_size
 
@@ -523,21 +523,17 @@ class Sampler:
         self.batch_counter = 0
         self.data_indices = []
         self.logits = []
+
         self.prepared_data = []
         if not is_subseq:
             for session in data:
-                length = len(session)
-                if length < 2:
-                    continue
                 self.prepared_data.append(session)
+                length = len(session)
                 if length > 2:
                     for t in range(1, length - 1):
                         self.prepared_data.append(session[:-t])
         else:
             for session in data:
-                length = len(session)
-                if length < 2:
-                    continue
                 self.prepared_data.append(session)
 
         self.data_indices = list(range(len(self.prepared_data)))
@@ -553,23 +549,8 @@ class Sampler:
                 seq (list): The input sequence with fixed length set by maxlen.
                 pos (int): Label (item number).
         """
-
-        # seq = np.zeros([self.maxlen], dtype=np.int32)
-        # pos = np.zeros([self.maxlen], dtype=np.int32)
-        # nxt = session[-1]
-        # idx = self.maxlen - 1
-
-        # ts = set(session)
-        # for i in reversed(session[:-1]):
-        #     seq[idx] = i
-        #     pos[idx] = nxt
-        #     nxt = i
-        #     idx -= 1
-        #     if idx == -1: break
-        ts = set(session)
         seq = np.zeros([self.maxlen], dtype=np.int32)
         pos = np.array(session[-1], dtype=np.int32)
-        neg = random_neq(1, self.max_item + 1, ts)
         idx = self.maxlen - 1
 
         for itemId in reversed(session[:-1]):
@@ -578,7 +559,7 @@ class Sampler:
             if idx == -1:
                 break
 
-        return seq, pos, neg
+        return seq, pos, pos
 
     def add_exemplar(self,
                      exemplar: list
@@ -607,7 +588,7 @@ class Sampler:
                 valid_data (list): Validation sub-sequence.
                 train_data (list): Training sub-sequence.
         """
-        
+
         data_size = len(self.prepared_data)
         sidx = np.arange(data_size, dtype='int32')
         np.random.shuffle(sidx)
@@ -1513,10 +1494,15 @@ def data_partition(fname):
     return [user_train, user_valid, user_test, usernum, itemnum]
 
 
-def evaluate_continue_learning(predictions, max_item, pos):
+def evaluate_continue_learning(seqs, predictions, max_item, pos):
     test_user = 0.0
     MRR_10, RECALL_10, MRR_20, RECALL_20 = 0.0, 0.0, 0.0, 0.0
-    for prediction, label in zip(predictions, pos):
+    for seq, prediction, label in zip(seqs, predictions, pos):
+        # if label in seq:
+        #     continue
+        # for item in seq:
+        #     prediction[item] = np.inf
+
         rank = prediction.argsort().argsort()[label].item()
 
         test_user += 1

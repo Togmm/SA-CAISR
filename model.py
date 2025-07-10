@@ -90,7 +90,7 @@ class SASRec_ader(torch.nn.Module):
         return log_feats
 
     def forward(self, log_seqs, max_item): # for training        
-        item_indices = [i for i in range(0, max_item + 1)]
+        item_indices = [i for i in range(1, max_item + 1)]
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
         log_feat = log_feats[:, -1, :]
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev))
@@ -99,7 +99,7 @@ class SASRec_ader(torch.nn.Module):
         return logits
 
     def predict(self, log_seqs, max_item): # for inference
-        item_indices = [i for i in range(0, max_item + 1)]
+        item_indices = [i for i in range(1, max_item + 1)]
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
         log_feat = log_feats[:, -1, :]
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev))
@@ -200,13 +200,13 @@ class SASRec_continue_learning(torch.nn.Module):
 
         self.item_num = item_num
         self.dev = args.device
+        self.beta = args.beta
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
         # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
         self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
         self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
         self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
-
         self.attention_layernorms = torch.nn.ModuleList() # to be Q for self-attention
         self.attention_layers = torch.nn.ModuleList()
         self.forward_layernorms = torch.nn.ModuleList()
@@ -261,18 +261,148 @@ class SASRec_continue_learning(torch.nn.Module):
     def forward(self, log_seqs, max_item): # for training    
         item_indices = [i for i in range(0, max_item + 1)]
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
-        log_feat = log_feats[:, -1, :]
-        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev))
-        logits = log_feat.matmul(item_embs.T)
+        log_feat = log_feats[:, -1, :]  # b x unit
+
+        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # item x unit
+        logits = log_feat.matmul(item_embs.T) # b x item
+
         return log_feat, logits
 
     def predict(self, log_seqs, max_item): # for inference
         item_indices = [i for i in range(0, max_item + 1)]
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
-        log_feat = log_feats[:, -1, :]
-        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev))
-        logits = log_feat.matmul(item_embs.T)
+        log_feat = log_feats[:, -1, :]  # b x unit
+
+        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # item x unit
+        logits = log_feat.matmul(item_embs.T) # b x item
+        
         return logits
+
+class SASRec_continue_learning_period_emb(torch.nn.Module):
+    def __init__(self, item_num, args):
+        super(SASRec_continue_learning, self).__init__()
+
+        self.item_num = item_num
+        self.dev = args.device
+        self.beta = args.beta
+
+        # TODO: loss += args.l2_emb for regularizing embedding vectors during training
+        # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
+        self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
+        self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
+        self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
+        self.period_emb = torch.nn.Embedding(1, args.hidden_units)
+        self.attention_layernorms = torch.nn.ModuleList() # to be Q for self-attention
+        self.attention_layers = torch.nn.ModuleList()
+        self.forward_layernorms = torch.nn.ModuleList()
+        self.forward_layers = torch.nn.ModuleList()
+
+        self.last_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
+
+        # self.mlp_predictor = torch.nn.Sequential(
+        #     torch.nn.Linear(args.hidden_units, args.hidden_units),
+        #     torch.nn.ReLU(),
+        #     torch.nn.Linear(args.hidden_units, self.item_num + 1)  # 输出维度为 item_num + 1
+        # )
+        # self.mlp_predictor = torch.nn.Linear(args.hidden_units, self.item_num + 1)
+
+        # self.concat_compressor = torch.nn.Sequential(
+        #     torch.nn.Linear(args.hidden_units * 2, args.hidden_units),
+        # )
+
+        for _ in range(args.num_blocks):
+            new_attn_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
+            self.attention_layernorms.append(new_attn_layernorm)
+
+            new_attn_layer =  torch.nn.MultiheadAttention(args.hidden_units,
+                                                            args.num_heads,
+                                                            args.dropout_rate)
+            self.attention_layers.append(new_attn_layer)
+
+            new_fwd_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
+            self.forward_layernorms.append(new_fwd_layernorm)
+
+            new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
+            self.forward_layers.append(new_fwd_layer)
+
+
+    def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
+        seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
+        seqs *= self.item_emb.embedding_dim ** 0.5
+        poss = np.tile(np.arange(1, log_seqs.shape[1] + 1), [log_seqs.shape[0], 1])
+        # TODO: directly do tensor = torch.arange(1, xxx, device='cuda') to save extra overheads
+        poss *= (log_seqs != 0)
+        seqs += self.pos_emb(torch.LongTensor(poss).to(self.dev))
+        seqs = self.emb_dropout(seqs)
+
+        tl = seqs.shape[1] # time dim len for enforce causality
+        attention_mask = ~torch.tril(torch.ones((tl, tl), dtype=torch.bool, device=self.dev))
+
+        for i in range(len(self.attention_layers)):
+            seqs = torch.transpose(seqs, 0, 1)
+            Q = self.attention_layernorms[i](seqs)
+            mha_outputs, _ = self.attention_layers[i](Q, seqs, seqs, 
+                                            attn_mask=attention_mask)
+                                            # need_weights=False) this arg do not work?
+            seqs = Q + mha_outputs
+            seqs = torch.transpose(seqs, 0, 1)
+
+            seqs = self.forward_layernorms[i](seqs)
+            seqs = self.forward_layers[i](seqs)
+
+        log_feats = self.last_layernorm(seqs) # (U, T, C) -> (U, -1, C)
+
+        return log_feats
+
+    def forward(self, log_seqs, max_item): # for training    
+        item_indices = [i for i in range(0, max_item + 1)]
+        log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
+        log_feat = log_feats[:, -1, :]  # b x unit
+        period_emb = self.period_emb(torch.LongTensor([0]).to(self.dev)) # 1 x unit
+        # log_feat += self.period_emb(torch.LongTensor([0]).to(self.dev))
+
+        # period_emb_expanded = period_emb.expand(log_feat.size(0), -1)
+        # log_feat_with_period = torch.cat([log_feat, period_emb_expanded], dim=1)  # shape: (batch_size, hidden_dim * 2)
+ 
+        # log_feat_compressed = self.concat_compressor(log_feat_with_period)
+        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # item x unit
+        # logits = log_feat_compressed.matmul(item_embs.T) 
+        logits = log_feat.matmul(item_embs.T) # b x item
+        period_logits = period_emb.matmul(item_embs.T)
+        period_logits = period_logits.expand(logits.size(0), -1)
+        final_logits = logits + self.beta * period_logits
+        # print(f'logits:{logits}, period_logits:{period_logits}, beta:{self.beta}, final_logits:{final_logits}')
+        # import pdb
+        # pdb.set_trace()
+        # period_logits = period_emb.expand(period_emb.size(-1), -1) # unit x unit
+        # log_feat_with_period = log_feat.matmul(period_logits)
+        # final_logits = log_feat_with_period.matmul(item_embs.T)
+
+        return log_feat, final_logits
+
+    def predict(self, log_seqs, max_item): # for inference
+        item_indices = [i for i in range(0, max_item + 1)]
+        log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
+        log_feat = log_feats[:, -1, :]  # b x unit
+        period_emb = self.period_emb(torch.LongTensor([0]).to(self.dev)) # 1 x unit
+        # log_feat += self.period_emb(torch.LongTensor([0]).to(self.dev))
+
+        # period_emb_expanded = period_emb.expand(log_feat.size(0), -1)
+        # log_feat_with_period = torch.cat([log_feat, period_emb_expanded], dim=1)  # shape: (batch_size, hidden_dim * 2)
+ 
+        # log_feat_compressed = self.concat_compressor(log_feat_with_period)
+        item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # item x unit
+        # logits = log_feat_compressed.matmul(item_embs.T) 
+        logits = log_feat.matmul(item_embs.T) # b x item
+        period_logits = period_emb.matmul(item_embs.T)
+        period_logits = period_logits.expand(logits.size(0), -1)
+        final_logits = logits + self.beta * period_logits
+
+        # period_logits = period_emb.expand(period_emb.size(-1), -1) # unit x unit
+        # log_feat_with_period = log_feat.matmul(period_logits)
+        # final_logits = log_feat_with_period.matmul(item_embs.T)
+        
+        return final_logits
 
 class SASRec_DPO_sequence(torch.nn.Module):
     def __init__(self, item_num, args):
@@ -557,7 +687,7 @@ class SASRec_DPO_label(torch.nn.Module):
 
     def forward(self, seq, pos_seqs, neg_seqs): # for training        
         log_feats = self.log2feats(seq) # user_ids hasn't been used yet
-
+    
         pos_embs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))
         neg_embs = self.item_emb(torch.LongTensor(neg_seqs).to(self.dev))
 
