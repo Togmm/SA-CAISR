@@ -148,7 +148,7 @@ if __name__ == '__main__':
             continue
 
         if args.inference_only:
-            args.state_dict_path = '/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/result/Amazon_Sports_and_Outdoors_tol/Amazon_Sports_and_Outdoors_linrec_retrain_dp_0.2214/period4/epoch=10.ckpt'
+            args.state_dict_path = '/result/Amazon_Sports_and_Outdoors_tol/Amazon_Sports_and_Outdoors_linrec_retrain_dp_0.2214/period4/epoch=10.ckpt'
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
             test_result = evaluate_result(num_test_batch, test_sampler, model, max_item)

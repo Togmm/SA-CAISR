@@ -5,7 +5,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='DIGINETICA', type=str)
 args = parser.parse_args()
-dir_path = f'/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/data/{args.dataset}'
+dir_path = f'/data/{args.dataset}'
 
 file_paths = sorted(
     [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith('.txt')]

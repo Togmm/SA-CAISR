@@ -321,12 +321,12 @@ if __name__ == '__main__':
         print(f'period:{i}')
         # remove data according to occurrences time
         removed_data, _ = short_remove(D[i], args)
-        generate_final(removed_data, item_map, item_reverse_map_reverse, f'/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/data/{dataset_name}/period_{i}.txt')
+        generate_final(removed_data, item_map, item_reverse_map_reverse, f'/data/{dataset_name}/period_{i}.txt')
     print(len(item_map))
 
     # idx2item = {v:item_map_reverse[k] for k,v in item_reverse_map_reverse.items()}
     idx2item = {k:item_map_reverse[v] for k,v in item_reverse_map_reverse.items()}
-    with open('/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/data/case_study/idx2item.json', 'w', encoding='utf-8') as f:
+    with open('data/case_study/idx2item.json', 'w', encoding='utf-8') as f:
         json.dump(idx2item, f, ensure_ascii=False, indent=4)
     
 

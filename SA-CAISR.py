@@ -164,7 +164,7 @@ if __name__ == '__main__':
             continue
             
         if args.inference_only:
-            args.state_dict_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
+            args.state_dict_path = 'result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
             test_result = evaluate_result(num_test_batch, test_sampler, model, max_item)
@@ -177,7 +177,7 @@ if __name__ == '__main__':
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
         elif period == 2 and not args.joint:
-            args.state_dict_path = f'/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/result/{args.dataset}_fintune_ce_dp_0.3_lr_0.0005_baseline/period1/best.ckpt'
+            args.state_dict_path = f'/result/{args.dataset}_fintune_ce_dp_0.3_lr_0.0005_baseline/period1/best.ckpt'
             model_dp.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
