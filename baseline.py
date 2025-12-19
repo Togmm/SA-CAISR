@@ -81,7 +81,7 @@ if __name__ == '__main__':
     else:
         raise ValueError('Invalid dataset name')
     
-    model = SASRec_linrec(itemnum, args).to(args.device)
+    model = SASRec(itemnum, args).to(args.device)
     periods = get_periods(args.dataset)
     dataloader = DataLoader(args.dataset, args.maxlen)
     ce_criterion = torch.nn.CrossEntropyLoss()
