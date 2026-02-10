@@ -275,7 +275,7 @@ class SASRec(torch.nn.Module):
     def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
         seqs_idx = torch.as_tensor(log_seqs, dtype=torch.long, device=self.dev)
 
-        # 2️⃣ 检查范围并立即同步 GPU
+        # 2️⃣ Check the scope and synchronize the GPU immediately
         min_val = int(seqs_idx.min().item())
         max_val = int(seqs_idx.max().item())
         torch.cuda.synchronize()
@@ -285,7 +285,7 @@ class SASRec(torch.nn.Module):
                 f"embedding_size={self.item_emb.num_embeddings}")
             raise ValueError("Embedding index out of range")
 
-        # 3️⃣ 尝试 lookup，并捕获所有类型异常（包括 CUDA）
+        # 3️⃣ Try lookup and catch all types of exceptions (including CUDA)
         try:
             seqs = self.item_emb(seqs_idx)
         except Exception as e:

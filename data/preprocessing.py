@@ -306,9 +306,9 @@ if __name__ == '__main__':
     total_len = len(reformed_data)
     d0_len = int(total_len * 0.6)
     remain_len = total_len - d0_len
-    period_len = remain_len // 4  # 每个后期阶段的长度
+    period_len = remain_len // 4  
 
-    # Step 2: 划分阶段
+    
     D = []
     D.append(reformed_data[:d0_len])
     for i in range(3):

@@ -97,8 +97,8 @@ if __name__ == '__main__':
     
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
-    # 以 MB 为单位
-    rss_mem = mem_info.rss / 1024**2   # 常用指标: Resident Set Size
+    
+    rss_mem = mem_info.rss / 1024**2   # Resident Set Size
     print(f"Current memory usage: {rss_mem:.2f} MB")
     log.write(f"Current memory usage: {rss_mem:.2f} MB\n")
 
@@ -235,8 +235,8 @@ if __name__ == '__main__':
 
         process = psutil.Process(os.getpid())
         mem_info = process.memory_info()
-        # 以 MB 为单位
-        rss_mem = mem_info.rss / 1024**2   # 常用指标: Resident Set Size
+        
+        rss_mem = mem_info.rss / 1024**2   # Resident Set Size
         print(f"Current memory usage: {rss_mem:.2f} MB")
         log.write(f"Current memory usage: {rss_mem:.2f} MB\n")
 

@@ -15,22 +15,21 @@ import psutil
 @contextmanager
 def apply_fisher_mask(model, mask_dict):
     """
-    临时应用 Fisher-guided dropout mask 到 model 参数上，
-    forward 完成后自动恢复。
+    Temporarily apply the Fisher-guided dropout mask to model parameters, and it will automatically recover after the forward pass.
     """
     backup = {}
     with torch.no_grad():
-        # 先保存原始参数副本
+        # First save a copy of the original parameters
         for name, param in model.named_parameters():
             if name in mask_dict:
                 backup[name] = param.data.clone()
-                # 临时替换为 masked 权重
+                # Temporarily replaced with masked weights
                 param.data = param.data * mask_dict[name]
     try:
         yield
     finally:
         with torch.no_grad():
-            # 恢复原始权重
+            # Restore original weights
             for name, param in model.named_parameters():
                 if name in backup:
                     param.data = backup[name]
@@ -47,7 +46,7 @@ parser.add_argument('--num_blocks', default=2, type=int)
 parser.add_argument('--num_epochs', default=100, type=int)
 parser.add_argument('--num_heads', default=1, type=int)
 parser.add_argument('--dropout_rate', default=0.0, type=float)
-parser.add_argument('--dropout_rate_train', default=0.0838, type=float)
+parser.add_argument('--dropout_rate_train', default=0.3, type=float)
 parser.add_argument('--l2_emb', default=0.0, type=float)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=bool)
@@ -59,15 +58,17 @@ parser.add_argument('--valid_portion', default=0.1, type=float)
 parser.add_argument('--stop', default=5, type=int) 
 parser.add_argument('--random_seed', default=0, type=int)
 parser.add_argument('--beta', default=0, type=float)
-parser.add_argument('--alpha', default=0.9915, type=float)
-parser.add_argument('--kneg', default=1, type=int)
-parser.add_argument('--probs_sampling', default=False, type=bool) 
-parser.add_argument('--temperature', default=1.0, type=float)
-parser.add_argument('--prune_ratio', default=0.2, type=float)
-parser.add_argument('--decay_factor', default=0.21739, type=float)
-parser.add_argument('--ema_beta', default=0.821179, type=float)
-parser.add_argument('--max_p', default=0.40017, type=float)
-parser.add_argument('--topk', default=0, type=int)
+parser.add_argument('--alpha', default=4, type=float)
+parser.add_argument('--trials', required=True, type=int)
+parser.add_argument('--max_p', default=0.8, type=float)
+parser.add_argument('--decay_factor', default=0.9, type=float)
+parser.add_argument('--ema_beta', default=0.63, type=float)
+parser.add_argument('--topk', default=128, type=int)
+parser.add_argument('--use_fisher_filtered', default='True', type=str)
+parser.add_argument('--use_infonce', default='True', type=str)
+parser.add_argument('--fisher_batch_updata', default='True', type=str)
+parser.add_argument('--fisher_smooth_update', default='True', type=str)
+parser.add_argument('--is_ablation', default='False', type=str, required=True)
 
 args = parser.parse_args()
 if not os.path.isdir(f'result/{args.dataset}_tol/' + args.dataset + '_' + args.train_dir):
@@ -88,14 +89,8 @@ if __name__ == '__main__':
         itemnum = 43136    # number of items in DIGINETICA
     elif args.dataset == 'YOOCHOOSE':
         itemnum = 25958    # number of items in YOOCHOOSE
-    elif args.dataset == 'TAOBAO':
-        itemnum = 681413
     elif args.dataset == 'Gowalla':
         itemnum = 70760
-    elif args.dataset == 'yelp':
-        itemnum = 60154
-    elif args.dataset == 'ml-1m':
-        itemnum = 2884
     elif args.dataset == 'Amazon_Sports_and_Outdoors':
         itemnum = 205843
     else:
@@ -164,7 +159,7 @@ if __name__ == '__main__':
             continue
             
         if args.inference_only:
-            args.state_dict_path = 'result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
+            args.state_dict_path = '/data/wangxinru-slurm/project/Rec/SASRec/SASRec/result/DIGINETICA_fintune_ce_dp_0.3_lr_0.0005_baseline_68_0626/period1/epoch=12.ckpt'
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
             test_result = evaluate_result(num_test_batch, test_sampler, model, max_item)
@@ -177,7 +172,7 @@ if __name__ == '__main__':
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
         elif period == 2 and not args.joint:
-            args.state_dict_path = f'/result/{args.dataset}_fintune_ce_dp_0.3_lr_0.0005_baseline/period1/best.ckpt'
+            args.state_dict_path = f'/home/aizoo/data/usershare/wangxinru/SASRec_bp/vision_0.98/SASRec/result/{args.dataset}_fintune_ce_dp_0.3_lr_0.0005_baseline/period1/best.ckpt'
             model_dp.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
             print(f'load ckpt from {args.state_dict_path} successfully!')
@@ -195,14 +190,54 @@ if __name__ == '__main__':
         valid_result = evaluate_result(num_valid_batch, valid_sampler, model, max_item)
         print('Valid period: %d  (MRR@10: %.4f, Recall@10: %.4f, NDCG@10: %.4f, MRR@20: %.4f, Recall@20: %.4f, NDCG@20: %.4f)' % (period, valid_result[0], valid_result[1], valid_result[2], valid_result[3], valid_result[4], valid_result[5]))
         log.write('Valid period: %d (MRR@10: %.4f, Recall@10: %.4f, NDCG@10: %.4f, MRR@20: %.4f, Recall@20: %.4f, NDCG@20: %.4f)\n' % (period, valid_result[0], valid_result[1], valid_result[2], valid_result[3], valid_result[4], valid_result[5]))
-
         fisher_dict = {name: torch.zeros_like(p) for name, p in model.named_parameters() if p.requires_grad}
         for epoch in range(1, args.num_epochs + 1):
             print(f'num_batch:{num_batch}')
+            
+            if args.fisher_batch_updata.lower() == 'false':
+                print("Computing fixed Fisher matrix for entire epoch...")
+                fisher_dict = {name: torch.zeros_like(p) for name, p in model.named_parameters() if p.requires_grad}
+                # 1. First, traverse the entire epoch to calculate the Fisher matrix.
+                model.eval()
+                # Note: Do not use torch.no_grad(), as gradients need to be computed.
+                for step in range(num_batch):
+                    session, seq, pos, neg = train_sampler.sampler()
+                    seq, pos, neg = np.array(seq), np.array(pos), np.array(neg)
+                    
+                    assert np.max(seq) < itemnum, f"Sequence contains item id {np.max(seq)} >= itemnum {itemnum}"
+                    
+                    if args.use_fisher_filtered.lower() == 'true':
+                        feature_dp_fisher, logits_dp_fisher = model_dp(seq, max_item)
+                        pos_tensor = torch.as_tensor(pos[:, -1], dtype=torch.long, device=args.device)
+                        loss_ce_dp = ce_criterion(logits_dp_fisher, pos_tensor)
+                        
+                        # calculate gradient
+                        named_params_dp = [(n, p) for n, p in model_dp.named_parameters() if p.requires_grad]
+                        params_dp = [p for _, p in named_params_dp]
+                        grads_dp = torch.autograd.grad(loss_ce_dp, params_dp, retain_graph=True)
+                        
+                        # Accumulate Fisher information
+                        for (name, p), g in zip(named_params_dp, grads_dp):
+                            if g is not None:
+                                fisher_dict[name] += g.detach().pow(2)
+                        
+                        # clearing calculation graph
+                        del loss_ce_dp, grads_dp
+                
+                # 2. Fisher matrix normalization (averaged by epoch)
+                for name in fisher_dict:
+                    fisher_dict[name] /= num_batch
+                
+                print("Fixed Fisher matrix computed.")
+
             model.train()
             for step in range(num_batch): # tqdm(range(num_batch), total=num_batch, ncols=70, leave=False, unit='b'):
-                session, seq, pos, neg = train_sampler.sampler() # single negative samples
+                
+                if args.fisher_batch_updata.lower() == 'true':
+                    if args.fisher_smooth_update.lower() == 'false':
+                        fisher_dict = {name: torch.zeros_like(p) for name, p in model.named_parameters() if p.requires_grad}
 
+                session, seq, pos, neg = train_sampler.sampler() # single negative samples
                 seq, pos, neg = np.array(seq), np.array(pos), np.array(neg)
                 
                 assert np.max(seq) < itemnum, f"Sequence contains item id {np.max(seq)} >= itemnum {itemnum}"
@@ -211,31 +246,41 @@ if __name__ == '__main__':
                 pos = pos[:, -1]
                 pos = torch.as_tensor(pos, dtype=torch.long, device=args.device)
 
-                feature_dp, logits_dp = model_dp(seq, max_item)
+                if args.use_fisher_filtered.lower() == 'true':
+                    if args.fisher_batch_updata.lower() == 'true':
+                        feature_dp_fisher, logits_dp_fisher = model_dp(seq, max_item)
 
-                loss_ce_dp = ce_criterion(logits_dp, pos)
+                        loss_ce_dp = ce_criterion(logits_dp_fisher, pos)
 
-                # 注意：这里只取 model_dp 的参数
-                named_params_dp = [(n, p) for n, p in model_dp.named_parameters() if p.requires_grad]
-                params_dp = [p for _, p in named_params_dp]
+                        # Note: Here we only take the parameters of model_dp
+                        named_params_dp = [(n, p) for n, p in model_dp.named_parameters() if p.requires_grad]
+                        params_dp = [p for _, p in named_params_dp]
 
-                grads_dp = torch.autograd.grad(loss_ce_dp, params_dp, retain_graph=True)
+                        grads_dp = torch.autograd.grad(loss_ce_dp, params_dp, retain_graph=True)
+                    
+                        for (name, p), g in zip(named_params_dp, grads_dp):
+                            if g is not None:
+                                if name not in fisher_dict:
+                                    fisher_dict[name] = torch.zeros_like(p.data)
+                                fisher_dict[name] = args.ema_beta * fisher_dict[name] + (1 - args.ema_beta) * g.detach().pow(2)
+                    
+                    mask_dict = fisher_weighted_dropout(model_dp, fisher_dict, args.max_p)
 
-                for (name, p), g in zip(named_params_dp, grads_dp):
-                    if g is not None:
-                        if name not in fisher_dict:
-                            fisher_dict[name] = torch.zeros_like(p.data)
-                        fisher_dict[name] = args.ema_beta * fisher_dict[name] + (1 - args.ema_beta) * g.detach().pow(2)
-
-                mask_dict = fisher_weighted_dropout(model_dp, fisher_dict, args.max_p)
-
-                # 在 model_dp 上应用 mask，forward 完成后会恢复
-                with apply_fisher_mask(model_dp, mask_dict):
-                    # InFoNCE
-                    feature_dp, logits_dp = model_dp(seq, max_item)  # batch x itemnum
-                    # loss_nce = InFoNCE(logits, logits_dp)
+                    # Apply a mask on model_dp, it will be restored after forward is completed.
+                    with apply_fisher_mask(model_dp, mask_dict):
+                        with torch.no_grad():   
+                            feature_dp, logits_dp = model_dp(seq, max_item)  # batch x itemnum
+                            logits_dp = logits_dp.detach()
+                else:
+                    with torch.no_grad():  
+                        feature_dp, logits_dp = model_dp(seq, max_item)  # batch x itemnum
+                        logits_dp = logits_dp.detach()
+                
+                # loss_nce = InFoNCE(logits, logits_dp)
+                if args.use_infonce.lower() == 'true':
                     loss_nce = HardNegativeInfoNCE(logits, logits_dp, top_k = args.topk)
-                    # loss_nce = distillation_loss(logits, logits_dp)
+                else:
+                    loss_nce = distillation_loss(logits, logits_dp)
 
                 adam_optimizer.zero_grad()
                 loss_ce = ce_criterion(logits, pos)
@@ -283,8 +328,8 @@ if __name__ == '__main__':
 
         process = psutil.Process(os.getpid())
         mem_info = process.memory_info()
-        # 以 MB 为单位
-        rss_mem = mem_info.rss / 1024**2   # 常用指标: Resident Set Size
+        # In MB
+        rss_mem = mem_info.rss / 1024**2   
         print(f"Current memory usage: {rss_mem:.2f} MB")
         log.write(f"Current memory usage: {rss_mem:.2f} MB\n")
 

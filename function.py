@@ -31,8 +31,8 @@ def get_periods(dataset: str) -> list:
     return periods
 
 def save_model(model, args, period, epoch, last_ckpt_path):
-    # if last_ckpt_path != None:
-    #     os.remove(last_ckpt_path)
+    if last_ckpt_path != None:
+        os.remove(last_ckpt_path)
     folder = f'result/{args.dataset}_tol/' + args.dataset + '_' + args.train_dir + f'/period{period}'
     os.makedirs(folder, exist_ok=True)
     fname = 'epoch=%d.ckpt' % (epoch)
@@ -86,58 +86,58 @@ def load_exemplars(exemplar_pre: dict) -> list:
 
 def InFoNCE(logits_a, logits_b, temperature=0.07):
     """
-    logits_a: [B, item_num], 目标模型的预测分数（未 softmax）
-    logits_b: [B, item_num], 参考模型的预测分数（未 softmax）
+    logits_a: [B, item_num], The predicted score of the target model (not softmax)
+    logits_b: [B, item_num], The predicted score of the reference model (not softmax)
     """
-    # 归一化预测分数（可选，如果 logits 本身不归一化，这很重要）
+    # Normalize the predicted scores (optional, it's important depending on whether the logits are normalized)
     z_a = F.normalize(logits_a, dim=1)
     z_b = F.normalize(logits_b, dim=1)
 
-    # 相似度矩阵（dot-product similarity）
+    # similarity matrix（dot-product similarity）
     sim_matrix = torch.matmul(z_a, z_b.T)  # [B, B]
     sim_matrix /= temperature
 
-    # 构建标签（正样本是对角线）
+    # Construct labels (positive samples are the diagonals)
     batch_size = logits_a.size(0)
     labels = torch.arange(batch_size).to(logits_a.device)
 
-    # 对比损失（InfoNCE）
+    # Contrast loss（InfoNCE）
     loss = F.cross_entropy(sim_matrix, labels)
     return loss
 
 def HardNegativeInfoNCE(logits_a, logits_b, temperature=0.07, top_k=128):
     """
-    logits_a: [B, item_num]，目标模型的预测分数（未 softmax）
-    logits_b: [B, item_num]，参考模型的预测分数（未 softmax）
-    top_k: 每个样本使用多少个最相似的负样本
+    logits_a: [B, item_num], The predicted score of the target model (not softmax)
+    logits_b: [B, item_num], The predicted score of the reference model (not softmax)
+    top_k: Represents how many most similar negative samples are used for each sample
     """
-    # [1] 归一化预测表示
-    z_a = F.normalize(logits_a, dim=1)  # 当前模型
-    z_b = F.normalize(logits_b, dim=1)  # 参考模型
+    # [1] Normalized prediction representation
+    z_a = F.normalize(logits_a, dim=1)  # Update Model
+    z_b = F.normalize(logits_b, dim=1).detach()   # Reference Model
 
-    # [2] 相似度矩阵：sim(i,j) = z_a[i] @ z_b[j]
+    # [2] similarity matrix：sim(i,j) = z_a[i] @ z_b[j]
     sim_matrix = torch.matmul(z_a, z_b.T)  # [B, B]
 
     batch_size = sim_matrix.size(0)
 
-    # [3] 排除正样本对角线（mask），避免被选为 hard negative
+    # [3] Exclude the positive sample diagonal (mask) to avoid being selected as a hard negative
     mask = torch.eye(batch_size, dtype=torch.bool, device=sim_matrix.device)
     sim_matrix_masked = sim_matrix.masked_fill(mask, -1e9)
 
-    # [4] 获取 top-k hardest negatives 的相似度和索引
+    # [4] Get the similarity and index of top-k hardest negatives
     topk_vals, topk_indices = torch.topk(sim_matrix_masked, k=min(top_k, batch_size), dim=1)  # [B, k]
 
 
-    # [5] 获取正样本相似度（对角线）
+    # [5] Get the similarity of positive samples (diagonal)
     sim_pos = torch.diag(sim_matrix).unsqueeze(1)  # [B, 1]
 
-    # [6] 拼接正样本 + top-k hard negatives
+    # [6] Splicing positive samples + top-k hard negatives
     logits = torch.cat([sim_pos, topk_vals], dim=1)  # [B, k+1]
 
-    # [7] 构建标签：正样本是每行的第0个位置
+    # [7] Build labels: Positive sample is the 0th position of each row
     labels = torch.zeros(batch_size, dtype=torch.long, device=logits.device)
 
-    # [8] 计算 InfoNCE Loss（仅用正样本和 hard negatives）
+    # [8] Calculate InfoNCE Loss (only positive samples and hard negatives)
     loss = F.cross_entropy(logits / temperature, labels)
 
     return loss
@@ -146,88 +146,58 @@ def contrastive_loss(logits, logits_dp, labels, margin=0.5):
     """
     logits, logits_dp: (batch_size, num_classes)
     labels: (batch_size,) LongTensor
-    margin: 最小距离的边界（远离时）
+    margin: Minimum distance boundary (when far away)
     """
     logits = F.normalize(logits, dim=1)
     logits_dp = F.normalize(logits_dp, dim=1)
 
-    # 计算 logits_dp 的前 20 个最大值的索引（即 top-20 预测）
+    # Compute the index of the top 20 maximum values ​​of logits_dp (i.e. top-20 predictions)
     topk = 20
     topk_preds = logits_dp.topk(topk, dim=1).indices  # (batch_size, 20)
 
-    # 判断每个样本的真实标签是否出现在对应的 top-20 中
-    # labels: (batch_size,) -> (batch_size, 1) 以便广播比较
+    # Determine whether the true label of each sample appears in the corresponding top-20
+    # labels: (batch_size,) -> (batch_size, 1) 
     labels_expanded = labels.unsqueeze(1)  # (batch_size, 1)
 
-    # mask 表示是否在 top-20 内，即预测正确（在宽限范围内）
+    # mask indicates whether it is within top-20, that is, the prediction is correct (within the grace range)
     mask = (topk_preds == labels_expanded).any(dim=1)  # (batch_size,)
 
-    # 计算余弦相似度（也可以换成 L2）
+    # Calculate cosine similarity (can also be changed to L2)
     sim = F.cosine_similarity(logits, logits_dp, dim=1)  # (batch_size,)
 
-    # 对于正确的样本，希望两者靠近 => 相似度高 => loss = 1 - sim
+    # For the correct sample, we hope that the two are close => high similarity => loss = 1 - sim
     positive_loss = (1 - sim)[mask].mean() if mask.any() else 0.0
 
-    # 对于错误的样本，希望两者远离 => 相似度低 => loss = max(0, sim - margin)
-    negative_loss = F.relu(sim[~mask] - margin).mean() if (~mask).any() else 0.0
-
-    return positive_loss + negative_loss
-
-def contrastive_loss_fe(logits, logits_dp, feature, feature_dp, labels, margin=0.5):
-    """
-    logits, logits_dp: (batch_size, num_classes)
-    labels: (batch_size,) LongTensor
-    margin: 最小距离的边界（远离时）
-    """
-    logits = F.normalize(logits, dim=1)
-    logits_dp = F.normalize(logits_dp, dim=1)
-    # 计算 logits_dp 的前 20 个最大值的索引（即 top-20 预测）
-    topk = 20
-    topk_preds = logits_dp.topk(topk, dim=1).indices  # (batch_size, 20)
-
-    # 判断每个样本的真实标签是否出现在对应的 top-20 中
-    # labels: (batch_size,) -> (batch_size, 1) 以便广播比较
-    labels_expanded = labels.unsqueeze(1)  # (batch_size, 1)
-
-    # mask 表示是否在 top-20 内，即预测正确（在宽限范围内）
-    mask = (topk_preds == labels_expanded).any(dim=1)  # (batch_size,)
-
-    # 计算余弦相似度（也可以换成 L2）
-    sim = F.cosine_similarity(feature, feature_dp, dim=1)  # (batch_size,)
-
-    # 对于正确的样本，希望两者靠近 => 相似度高 => loss = 1 - sim
-    positive_loss = (1 - sim)[mask].mean() if mask.any() else 0.0
-
-    # 对于错误的样本，希望两者远离 => 相似度低 => loss = max(0, sim - margin)
+    # For wrong samples, we hope that the two are far away => low similarity => loss = max(0, sim - margin)
     negative_loss = F.relu(sim[~mask] - margin).mean() if (~mask).any() else 0.0
 
     return positive_loss + negative_loss
 
 def distillation_loss(logits, logits_dp, temperature=1.0):
     """
-    logits: 学生模型输出，shape=[B, N]
-    logits_dp: 教师模型输出，shape=[B, N]
-    temperature: 蒸馏温度，一般设为1.0~5.0之间
+    logits: Student model output,shape=[B, N]
+    logits_dp: Teacher model output,shape=[B, N]
+    temperature: distillation temperature,一般设为1.0~5.0之间
     """
-    # 使用temperature softmax得到soft targets
+    # Use temperature softmax to get soft targets
     soft_target = F.softmax(logits_dp / temperature, dim=1)
     log_pred = F.log_softmax(logits / temperature, dim=1)
     
-    # KL散度（student 模仿 teacher）
+    # KL divergence (student imitates teacher)
     loss_kl = F.kl_div(log_pred, soft_target, reduction='batchmean') * (temperature ** 2)
     return loss_kl
 
 def ewc_loss(model_new, model_old, fisher_dict):
     """
-    计算 Elastic Weight Consolidation (EWC) 损失。
+    computer Elastic Weight Consolidation (EWC) loss。
 
     参数:
-        model_new: 当前训练阶段的模型（需要更新的）
-        model_old: 参考阶段的旧模型（已冻结）
-        fisher_dict: dict，{参数名: Fisher 信息张量}
-        lambda_ewc: float，EWC 损失权重
+        model_new: Model in the current training stage (needs to be updated)
+        model_old: Old model in the reference stage (frozen)
+        fisher_dict: dict, {parameter name: Fisher information tensor}
+        lambda_ewc: float, EWC loss weight
     返回:
-        torch.Tensor: 总 EWC 损失
+        torch.Tensor: Total EWC loss
     """
 
     loss = 0.0
@@ -238,15 +208,15 @@ def ewc_loss(model_new, model_old, fisher_dict):
         if name in fisher_dict and name in old_state:
             fisher = fisher_dict[name]
             param_old = old_state[name].detach()
-            # 计算 EWC loss: F_i * (θ_i - θ*_i)^2
+            # computer EWC loss: F_i * (θ_i - θ*_i)^2
             loss += (fisher * (param_new - param_old).pow(2)).sum()
 
     return loss
 
 def compute_fisher(model, ewc_sampler, loss_fn, device, max_item):
     """
-    给定模型和数据，估计 Fisher 信息矩阵（近似对角）。
-    返回: fisher_dict，形如 {name: Tensor}
+    computer Fisher information matrix (approximation of diagonal) given model and data.
+    return: fisher_dict, such as {name: Tensor}
     """
 
     model.eval()
@@ -266,7 +236,6 @@ def compute_fisher(model, ewc_sampler, loss_fn, device, max_item):
             if param.grad is not None:
                 fisher_dict[name] += param.grad.data.pow(2)
 
-    # 归一化
     for name in fisher_dict:
         fisher_dict[name] /= ewc_batch
 
@@ -274,44 +243,52 @@ def compute_fisher(model, ewc_sampler, loss_fn, device, max_item):
 
 def global_prune_by_fisher(model, fisher_dict, prune_ratio=0.2):
     """
-    使用 Fisher 信息进行全局剪枝（参数置零）。
+    Global pruning (parameter zeroing) using Fisher information.
 
     Args:
-        model (nn.Module): 要剪枝的模型。
-        fisher_dict (dict): Fisher 信息字典，形如 {param_name: tensor with same shape as param}。
-        prune_ratio (float): 剪枝比例，比如 0.2 表示置零最小的 20% 参数。
+        model (nn.Module): Model to be pruned.
+        fisher_dict (dict): Fisher information dictionary, such as {param_name: tensor with same shape as param}.
+        prune_ratio (float): Pruning ratio, e.g. 0.2 means zeroing the bottom 20% parameters with smallest Fisher values.
 
     Returns:
-        mask_dict (dict): 剪枝后的 mask 字典，可用于后续继续训练时保持稀疏性。
+        mask_dict (dict): Pruning mask dictionary, such as {param_name: tensor with same shape as param}.
     """
 
-    # 1. 收集所有 Fisher 值
+    # 1. Collect all Fisher values
     all_fisher = torch.cat([
         f.view(-1) for name, f in fisher_dict.items()
         if name in dict(model.named_parameters())
     ])
     
-    # 2. 计算全局剪枝阈值（按Fisher值排序）
+    # 2. Compute global pruning threshold (by sorting Fisher values)
     threshold = torch.quantile(all_fisher, prune_ratio)
 
-    # 3. 生成 mask 并应用剪枝
+    # 3. Generate mask and apply pruning
     mask_dict = {}
     with torch.no_grad():
         for name, param in model.named_parameters():
             if name in fisher_dict:
                 fisher = fisher_dict[name]
-                # 生成 mask：保留重要参数
+                # Generate mask: keep important parameters
                 mask = (fisher > threshold).float()
-                # 应用 mask：直接将不重要参数置零
+                # Apply mask: directly set unimportant parameters to zero
                 param.mul_(mask)
-                # 保存 mask
+                # Save mask: keep important parameters as 1, unimportant parameters as 0
                 mask_dict[name] = mask
 
     return mask_dict
 
 def fisher_weighted_dropout(model, fisher_dict, max_p=0.6):
     """
-    基于 Fisher 信息的加权 Dropout (逐元素概率 + 缩放)。
+    Weighted Dropout (element-wise probability + scaling) based on Fisher information.
+
+    Args:
+        model (nn.Module): Model to be pruned.
+        fisher_dict (dict): Fisher information dictionary, such as {param_name: tensor with same shape as param}.
+        max_p (float): Maximum dropout probability, e.g. 0.6 means 60% dropout.
+
+    Returns:
+        mask_dict (dict): Pruning mask dictionary, such as {param_name: tensor with same shape as param}.
     """
     mask_dict = {}
     with torch.no_grad():
@@ -319,19 +296,20 @@ def fisher_weighted_dropout(model, fisher_dict, max_p=0.6):
             if name in fisher_dict:
                 fisher = fisher_dict[name]
 
-                # 1. Min-Max 归一化到 [0,1]
+                # 1. Min-Max normalized to [0,1]
                 fisher_norm = (fisher - fisher.min()) / (fisher.max() - fisher.min() + 1e-8)
 
-                # 2. 概率分配：范围 [0, max_p]
+                # 2. Element-wise probability assignment: range [0, max_p]
                 p = fisher_norm * max_p
+                p = torch.clamp(p, max=0.99)
 
-                # 3. 采样 dropout mask
+                # 3. Sample dropout mask
                 rand = torch.rand_like(param)
                 mask = (rand > p).float()
 
-                # 4. 缩放 (逐元素 inverted dropout)
-                scale = 1.0 / (1.0 - p + 1e-8)
-                # param.mul_(mask * scale)
+                # 4. Scaling (inverted dropout)
+                scale = 1.0 / (1.0 - p)
+                mask = mask * scale
 
                 mask_dict[name] = mask
 
